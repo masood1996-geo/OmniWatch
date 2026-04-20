@@ -3,6 +3,13 @@ import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import { runSweep, getLastSweep, getPreviousEvents } from './pipeline/sweep';
+import type { OmniEvent } from './clients/usgs';
+import { Ollama } from 'ollama';
+import { getLiveTracks, refreshLiveTracks, startLiveTracking } from './clients/live-tracking';
+
+const app = express();
+app.use(cors({ origin: '*' }));
+app.use(express.json());
 
 let currentIntel: OmniEvent[] = [];
 let sweepInProgress = false;
