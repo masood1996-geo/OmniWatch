@@ -18,10 +18,10 @@ RUN npm run build
 # --- Build Server ---
 WORKDIR /app/server
 COPY omniwatch-server/package.json omniwatch-server/package-lock.json* ./
-RUN npm install --omit=dev
+RUN npm install
 
 COPY omniwatch-server/ ./
-RUN npm run build || npx tsc
+RUN npx tsc
 
 # Set Production Environment right before creating the container execution state
 ENV NODE_ENV=production
