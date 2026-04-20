@@ -4,7 +4,6 @@ WORKDIR /app
 
 # Set port for HuggingFace Spaces
 ENV PORT=7860
-ENV NODE_ENV=production
 
 # --- Build Client (Static Export) ---
 WORKDIR /app/client
@@ -24,6 +23,8 @@ RUN npm install --omit=dev
 COPY omniwatch-server/ ./
 RUN npm run build || npx tsc
 
+# Set Production Environment right before creating the container execution state
+ENV NODE_ENV=production
 EXPOSE 7860
 
 # Start Express server, which is configured to serve the client's /out directory
