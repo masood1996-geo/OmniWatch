@@ -9,7 +9,7 @@ ENV NODE_ENV=production
 # --- Build Client (Static Export) ---
 WORKDIR /app/client
 COPY omniwatch-client/package.json omniwatch-client/package-lock.json* ./
-RUN npm install
+RUN npm install --include=dev
 
 COPY omniwatch-client/ ./
 # Point the API calls in page.tsx to relative paths instead of localhost:4100
