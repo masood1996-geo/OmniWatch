@@ -221,7 +221,10 @@ app.get('/api/live-tracking', async (req: express.Request, res: express.Response
 const PORT = process.env.PORT || 4100;
 
 // HuggingFace Spaces / Production mode
-const clientBuildPath = path.join(__dirname, '../../omniwatch-client/out');
+const clientBuildPath = process.env.NODE_ENV === 'production' 
+    ? path.join(__dirname, '../../client/out')
+    : path.join(__dirname, '../../omniwatch-client/out');
+
 app.use(express.static(clientBuildPath));
 app.get('*', (req, res) => {
     res.sendFile(path.join(clientBuildPath, 'index.html'));
