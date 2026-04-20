@@ -1,0 +1,101 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100vh;
+  overflow: hidden;
+  background-color: #050505;
+  color: #fff;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+* {
+  box-sizing: border-box;
+}
+
+/* MapLibre reset */
+.maplibregl-canvas {
+  outline: none;
+}
+
+/* MapLibre popup overrides */
+.maplibregl-popup-content {
+  background: transparent !important;
+  padding: 0 !important;
+  box-shadow: none !important;
+  border-radius: 8px !important;
+}
+.maplibregl-popup-close-button {
+  color: #888 !important;
+  font-size: 18px;
+  right: 8px !important;
+  top: 8px !important;
+  z-index: 10;
+}
+.maplibregl-popup-tip {
+  border-bottom-color: #111 !important;
+}
+
+/* Visual Spectra — from Shadowbroker */
+.map-style-flir {
+  filter: invert(1) hue-rotate(180deg) grayscale(100%) contrast(150%) brightness(120%);
+}
+.map-style-nvg {
+  filter: sepia(100%) hue-rotate(50deg) saturate(300%) contrast(150%) brightness(80%);
+}
+.map-style-crt {
+  filter: sepia(0.3) saturate(1.5) contrast(1.2) brightness(0.9) hue-rotate(80deg);
+}
+.map-style-crt::after {
+  content: " ";
+  display: block;
+  position: absolute;
+  top: 0; left: 0; bottom: 0; right: 0;
+  background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06));
+  z-index: 2;
+  background-size: 100% 2px, 3px 100%;
+  pointer-events: none;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.1);
+  border-radius: 2px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255,255,255,0.2);
+}
+
+/* Animations */
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+.spin {
+  animation: spin 1s linear infinite;
+}
+
+/* MapLibre nav controls */
+.maplibregl-ctrl-group {
+  background: rgba(10, 10, 10, 0.8) !important;
+  border: 1px solid rgba(255,255,255,0.1) !important;
+  border-radius: 8px !important;
+  backdrop-filter: blur(8px);
+}
+.maplibregl-ctrl-group button {
+  background: transparent !important;
+  border-color: rgba(255,255,255,0.06) !important;
+}
+.maplibregl-ctrl-group button + button {
+  border-top-color: rgba(255,255,255,0.06) !important;
+}
+.maplibregl-ctrl-group button span {
+  filter: invert(1) brightness(0.8);
+}
