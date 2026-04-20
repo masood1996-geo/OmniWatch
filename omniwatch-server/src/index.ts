@@ -233,7 +233,7 @@ const clientBuildPath = process.env.NODE_ENV === 'production'
     : path.join(__dirname, '../../omniwatch-client/out');
 
 app.use(express.static(clientBuildPath));
-app.get('*', (req, res) => {
+app.use((req, res) => {
     res.sendFile(path.join(clientBuildPath, 'index.html'));
 });
 
