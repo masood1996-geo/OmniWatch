@@ -1,7 +1,17 @@
 node_modules/
 .next/
 .env
+.env.*
+!.env.example
+!.env.template
 *.log
 out/
 dist/
+data/
+runs/
+coverage/
+*.db
+*.db-wal
+*.db-shm
 .DS_Store
+*.tsbuildinfo

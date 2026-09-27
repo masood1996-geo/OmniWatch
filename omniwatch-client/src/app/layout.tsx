@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "OmniWatch — Global Intelligence Matrix",
-  description: "Unified OSINT command center integrating 16+ real-time intelligence feeds across military, disaster, maritime, space, economic, and conflict domains.",
+  title: "OmniWatch — Provenance-Tracked OSINT",
+  description: "Self-hosted situational awareness that labels every signal with provider, license, fetch class, and confidence. No fabricated data.",
 };
 
 export default function RootLayout({

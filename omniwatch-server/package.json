@@ -1,29 +1,43 @@
 {
   "name": "omniwatch-server",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "version": "2.0.0",
+  "description": "OmniWatch API server: OSINT sweep pipeline with provenance, history, and alerting",
+  "main": "dist/index.js",
+  "private": true,
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev": "ts-node src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "check:sources": "ts-node -T scripts/check-sources.ts",
+    "verify:counts": "ts-node -T scripts/counts.ts"
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
+  "license": "AGPL-3.0-only",
   "type": "commonjs",
   "dependencies": {
+    "better-sqlite3": "^12.4.1",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "nodemailer": "^7.0.5",
     "ollama": "^0.6.3",
     "satellite.js": "^7.0.0",
     "ws": "^8.20.0"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/node": "^25.6.0",
+    "@types/nodemailer": "^7.0.11",
+    "@types/supertest": "^6.0.3",
     "@types/ws": "^8.18.1",
+    "supertest": "^7.1.4",
     "ts-node": "^10.9.2",
-    "typescript": "^6.0.2"
+    "typescript": "^6.0.2",
+    "vitest": "^3.2.4"
   }
 }

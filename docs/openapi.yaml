@@ -1,0 +1,442 @@
+openapi: 3.1.0
+info:
+  title: OmniWatch API
+  version: 2.0.0
+  description: |
+    Provenance-tracked OSINT situational awareness API.
+
+    Every event carries a `provenance` object with `fetchClass` (live/delayed/static/
+    simulated/disabled), `fetchedAt`, `sourceTimestamp`, `provider`, `license`,
+    `attribution`, and `confidence`. Events are never fabricated; disabled or failing
+    sources are reported via `/api/health` and `/api/adapters` instead of fake data.
+
+    Authentication is optional by default (rate limited by IP). If API keys have been
+    issued, send one as `Authorization: Bearer ow_...` to get a per-key bucket. Administrative
+    endpoints require `X-Admin-Key: <ADMIN_API_KEY>` (or a Bearer token equal to it).
+  license:
+    name: AGPL-3.0-only
+    url: https://www.gnu.org/licenses/agpl-3.0.html
+servers:
+  - url: /
+    description: Same origin (default; the server also serves the dashboard)
+  - url: http://localhost:4100
+    description: Local development
+tags:
+  - name: Public data
+  - name: Live tracking
+  - name: Chat
+  - name: History
+  - name: Alerts
+  - name: Admin
+security:
+  - {}
+  - bearerApiKey: []
+paths:
+  /api/adapters:
+    get:
+      tags: [Public data]
+      summary: Source registry with provenance and status metadata
+      responses:
+        "200":
+          description: Registry
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  total: { type: integer, example: 49 }
+                  counts:
+                    type: object
+                    additionalProperties: { type: integer }
+                  adapters:
+                    type: array
+                    items: { $ref: "#/components/schemas/Adapter" }
+  /api/events:
+    get:
+      tags: [Public data]
+      summary: Latest sweep events
+      parameters:
+        - { name: source, in: query, schema: { type: string }, description: Event source string }
+        - { name: severity, in: query, schema: { type: string, enum: [minor, moderate, major, critical] } }
+        - { name: eventType, in: query, schema: { type: string, example: earthquake } }
+        - { name: fetchClass, in: query, schema: { type: string, enum: [live, delayed, static, simulated, disabled] } }
+        - { name: hideNonLive, in: query, schema: { type: string, enum: ["true", "false"] } }
+        - { name: timeRange, in: query, schema: { type: string, enum: [hour, day, week] } }
+      responses:
+        "200":
+          description: Events with provenance
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  count: { type: integer }
+                  totalCount: { type: integer }
+                  timestamp: { type: string, format: date-time }
+                  sweepDurationMs: { type: integer }
+                  refreshIntervalMs: { type: integer }
+                  provenanceCounts:
+                    type: object
+                    additionalProperties: { type: integer }
+                  events:
+                    type: array
+                    items: { $ref: "#/components/schemas/OmniEvent" }
+  /api/health:
+    get:
+      tags: [Public data]
+      summary: Server and per-source health
+      responses:
+        "200":
+          description: Health
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [starting, operational] }
+                  lastSweep: { type: [string, "null"], format: date-time }
+                  totalSignals: { type: integer }
+                  totalSources: { type: integer }
+                  liveSources: { type: integer }
+                  disabledSources: { type: integer }
+                  errorSources: { type: integer }
+                  sourceHealth:
+                    type: array
+                    items: { $ref: "#/components/schemas/SourceHealth" }
+  /api/delta:
+    get:
+      tags: [Public data]
+      summary: Changes since the previous sweep
+      responses:
+        "200":
+          description: Delta
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  timestamp: { type: string, format: date-time }
+                  delta:
+                    type: object
+                    properties:
+                      new: { type: integer }
+                      removed: { type: integer }
+                      escalated: { type: integer }
+                      newEvents: { type: array, items: { $ref: "#/components/schemas/OmniEvent" } }
+                      removedEvents: { type: array, items: { $ref: "#/components/schemas/OmniEvent" } }
+                      escalatedEvents: { type: array, items: { $ref: "#/components/schemas/OmniEvent" } }
+  /api/stream:
+    get:
+      tags: [Public data]
+      summary: Server-Sent Events stream (sweep_complete frames, event ids, keepalive)
+      responses:
+        "200":
+          description: text/event-stream
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "503":
+          description: Too many SSE clients
+  /api/live-tracking:
+    get:
+      tags: [Live tracking]
+      summary: Aircraft/vessel snapshot with per-class status
+      responses:
+        "200":
+          description: Tracks. Empty when a class is disabled; `status` explains why.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  count: { type: integer }
+                  aircraft: { type: integer }
+                  vessels: { type: integer }
+                  tracks: { type: array, items: { type: object } }
+                  status:
+                    type: object
+                    properties:
+                      aircraft: { $ref: "#/components/schemas/LiveClassStatus" }
+                      vessels: { $ref: "#/components/schemas/LiveClassStatus" }
+  /api/chat:
+    post:
+      tags: [Chat]
+      summary: Ask J.A.R.V.I.S about the current signals (rate limited, offline fallback)
+      security:
+        - {}
+        - bearerApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query: { type: string, maxLength: 2000 }
+      responses:
+        "200":
+          description: Reply (mode=llm or mode=offline)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  reply: { type: string }
+                  mode: { type: string, enum: [llm, offline] }
+        "400":
+          description: Missing query
+        "429":
+          description: Rate limited (Retry-After header set)
+  /api/history:
+    get:
+      tags: [History]
+      summary: Paginated event history from SQLite
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, default: 100, maximum: 500 } }
+        - { name: cursor, in: query, schema: { type: string } }
+        - { name: source, in: query, schema: { type: string } }
+        - { name: severity, in: query, schema: { type: string } }
+        - { name: eventType, in: query, schema: { type: string } }
+        - { name: since, in: query, schema: { type: string, format: date-time } }
+        - { name: until, in: query, schema: { type: string, format: date-time } }
+      responses:
+        "200":
+          description: Page of events
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  items: { type: array, items: { $ref: "#/components/schemas/OmniEvent" } }
+                  nextCursor: { type: [string, "null"] }
+                  total: { type: integer }
+                  retentionDays: { type: integer }
+  /api/history/sweeps:
+    get:
+      tags: [History]
+      summary: Recent sweeps
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, default: 20 } }
+      responses:
+        "200":
+          description: Sweep list
+  /api/history/events/{id}:
+    get:
+      tags: [History]
+      summary: Single stored event
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Event }
+        "404": { description: Not found }
+  /api/alert-rules:
+    get:
+      tags: [Alerts]
+      summary: List alert rules and available channels
+      responses:
+        "200": { description: Rules }
+    post:
+      tags: [Alerts]
+      summary: Create a rule (admin)
+      security:
+        - adminKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AlertRuleInput" }
+      responses:
+        "200": { description: Created }
+        "401": { description: Admin key required or invalid }
+  /api/alert-rules/{id}:
+    put:
+      tags: [Alerts]
+      summary: Update a rule (admin)
+      security:
+        - adminKey: []
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AlertRuleInput" }
+      responses:
+        "200": { description: Updated }
+        "404": { description: Not found }
+    delete:
+      tags: [Alerts]
+      summary: Delete a rule (admin)
+      security:
+        - adminKey: []
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200": { description: Deleted }
+        "404": { description: Not found }
+  /api/alert-rules/test:
+    post:
+      tags: [Alerts]
+      summary: Send a synthetic test event to all configured channels (admin)
+      security:
+        - adminKey: []
+      responses:
+        "200": { description: Per-channel delivery results }
+  /api/sweep:
+    post:
+      tags: [Admin]
+      summary: Trigger a manual sweep (requires ADMIN_API_KEY when set)
+      security:
+        - adminKey: []
+      responses:
+        "200": { description: Sweep complete }
+        "401": { description: Admin key required or invalid }
+        "503": { description: ADMIN_API_KEY not configured in production }
+  /api/admin/keys:
+    get:
+      tags: [Admin]
+      summary: List API keys (no hashes)
+      security:
+        - adminKey: []
+      responses:
+        "200": { description: Keys }
+    post:
+      tags: [Admin]
+      summary: Issue an API key (returned once)
+      security:
+        - adminKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                scopes:
+                  type: array
+                  items: { type: string, enum: [read, admin] }
+      responses:
+        "200": { description: Key issued }
+  /api/admin/keys/{id}:
+    delete:
+      tags: [Admin]
+      summary: Revoke an API key
+      security:
+        - adminKey: []
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200": { description: Revoked }
+        "404": { description: Not found }
+components:
+  securitySchemes:
+    bearerApiKey:
+      type: http
+      scheme: bearer
+      description: "Issued key: ow_... (per-key rate limit bucket)"
+    adminKey:
+      type: apiKey
+      in: header
+      name: X-Admin-Key
+  schemas:
+    Adapter:
+      type: object
+      properties:
+        id: { type: string }
+        label: { type: string }
+        tier: { type: integer }
+        fetchClass: { type: string, enum: [live, delayed, static, simulated, disabled] }
+        provider: { type: string }
+        license: { type: string }
+        attribution: { type: string }
+        confidence: { type: number }
+        refreshMs: { type: integer }
+        requiresKeys: { type: array, items: { type: string } }
+        missingKeys: { type: array, items: { type: string } }
+        disabledReason: { type: string }
+        notes: { type: string }
+    EventProvenance:
+      type: object
+      required: [fetchClass, fetchedAt, sourceTimestamp, provider, sourceId, license, attribution, confidence]
+      properties:
+        fetchClass: { type: string, enum: [live, delayed, static, simulated, disabled] }
+        fetchedAt: { type: string, format: date-time }
+        sourceTimestamp: { type: [string, "null"], format: date-time }
+        provider: { type: string }
+        sourceId: { type: string }
+        license: { type: string }
+        attribution: { type: string }
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        verifiedAsOf: { type: [string, "null"] }
+        statusNote: { type: string }
+    OmniEvent:
+      type: object
+      required: [id, source, title, severity, timestamp, eventType, metadata]
+      properties:
+        id: { type: string }
+        source: { type: string }
+        title: { type: string }
+        severity: { type: string, enum: [minor, moderate, major, critical] }
+        coordinates:
+          type: [object, "null"]
+          properties:
+            longitude: { type: number }
+            latitude: { type: number }
+        timestamp: { type: string, format: date-time }
+        sourceTimestamp: { type: [string, "null"], format: date-time }
+        fetchedAt: { type: string, format: date-time }
+        eventType: { type: string }
+        metadata: { type: object, additionalProperties: true }
+        provenance: { $ref: "#/components/schemas/EventProvenance" }
+    SourceHealth:
+      type: object
+      properties:
+        id: { type: string }
+        label: { type: string }
+        fetchClass: { type: string }
+        status: { type: string, enum: [ok, error, disabled, skipped] }
+        count: { type: integer }
+        latencyMs: { type: integer }
+        lastSuccessAt: { type: [string, "null"] }
+        lastErrorAt: { type: [string, "null"] }
+        lastError: { type: [string, "null"] }
+        consecutiveFailures: { type: integer }
+        circuitOpenUntil: { type: [string, "null"] }
+    LiveClassStatus:
+      type: object
+      properties:
+        fetchClass: { type: string, enum: [live, disabled] }
+        provider: { type: string }
+        license: { type: string }
+        count: { type: integer }
+        note: { type: string }
+        lastSuccessAt: { type: [string, "null"] }
+        stale: { type: boolean }
+    AlertRuleInput:
+      type: object
+      required: [name, conditions]
+      properties:
+        name: { type: string }
+        enabled: { type: boolean, default: true }
+        channels:
+          type: array
+          items: { type: string, enum: [webhook, telegram, email] }
+        conditions:
+          type: object
+          properties:
+            minSeverity: { type: string, enum: [minor, moderate, major, critical] }
+            keywords: { type: array, items: { type: string } }
+            bbox:
+              type: array
+              items: { type: number }
+              minItems: 4
+              maxItems: 4
+              description: "[minLon, minLat, maxLon, maxLat]"
+            sources: { type: array, items: { type: string } }
+            eventTypes: { type: array, items: { type: string } }

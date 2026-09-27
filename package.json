@@ -1,0 +1,24 @@
+{
+  "name": "omniwatch",
+  "version": "2.0.0",
+  "private": true,
+  "description": "OmniWatch: self-hostable OSINT situational awareness with provenance-tracked sources, history, and alerting",
+  "license": "AGPL-3.0-only",
+  "workspaces": [
+    "omniwatch-server",
+    "omniwatch-client"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace omniwatch-client && npm run build --workspace omniwatch-server",
+    "start": "npm run start --workspace omniwatch-server",
+    "dev": "npm run dev --workspace omniwatch-server",
+    "dev:client": "npm run dev --workspace omniwatch-client",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "sources": "npm run check:sources --workspace omniwatch-server"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

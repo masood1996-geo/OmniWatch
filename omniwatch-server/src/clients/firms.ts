@@ -1,7 +1,14 @@
-import { OmniEvent } from './usgs';
+import type { OmniEvent, Severity } from '../types';
+
+export function frpToSeverity(frp: number): Severity {
+  if (frp > 200) return 'critical';
+  if (frp > 50) return 'major';
+  if (frp > 10) return 'moderate';
+  return 'minor';
+}
 
 // NASA FIRMS VIIRS 375m satellite fire detection — from TerraMind
-// Uses CSV endpoint which is free with FIRMS_MAP_KEY, falls back to EONET if no key
+// Uses the CSV endpoint, which requires FIRMS_MAP_KEY; returns [] without a key
 export async function fetchFIRMSFires(): Promise<OmniEvent[]> {
   const key = process.env.FIRMS_MAP_KEY;
   if (!key) {
@@ -34,16 +41,11 @@ export async function fetchFIRMSFires(): Promise<OmniEvent[]> {
 
       if (isNaN(lat) || isNaN(lon)) continue;
 
-      let severity: OmniEvent['severity'] = 'minor';
-      if (frp > 10) severity = 'moderate';
-      if (frp > 50) severity = 'major';
-      if (frp > 200) severity = 'critical';
-
       events.push({
         id: `firms-${lat.toFixed(3)}-${lon.toFixed(3)}-${i}`,
         source: 'nasa-firms',
         title: `VIIRS Fire Detection (FRP: ${frp.toFixed(1)} MW)`,
-        severity,
+        severity: frpToSeverity(frp),
         eventType: 'firmsfire',
         timestamp: `${acqDate}T${acqTime.padStart(4, '0').slice(0,2)}:${acqTime.padStart(4, '0').slice(2)}:00Z`,
         coordinates: { longitude: lon, latitude: lat },

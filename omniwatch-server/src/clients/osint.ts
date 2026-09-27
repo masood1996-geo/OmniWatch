@@ -1,127 +1,104 @@
-import { OmniEvent } from './usgs';
+import { fetchJson, fetchWithTimeout, hashId, toIso } from '../sources/helpers';
+import type { OmniEvent } from '../types';
 
-// Global Fishing Watch — vessel monitoring (from Shadowbroker)
-// Public API, limited without key but basic search works
-export async function fetchFishingActivity(): Promise<OmniEvent[]> {
-  // Known high-activity IUU fishing hotspots with live monitoring
-  const hotspots = [
-    { name: 'South China Sea Fleet', lon: 112.5, lat: 11.0, vessels: '200+', risk: 'critical', activity: 'Militia fishing fleet' },
-    { name: 'Argentine EEZ Boundary', lon: -59.0, lat: -44.0, vessels: '350+', risk: 'major', activity: 'Squid fleet (DWF)' },
-    { name: 'West Africa IUU Zone', lon: -17.0, lat: 13.5, vessels: '100+', risk: 'major', activity: 'Illegal trawling' },
-    { name: 'Galápagos Buffer', lon: -90.0, lat: -1.0, vessels: '150+', risk: 'major', activity: 'Chinese DWF fleet' },
-    { name: 'Somalia EEZ', lon: 49.0, lat: 5.0, vessels: '40+', risk: 'moderate', activity: 'Foreign trawlers' },
-    { name: 'North Pacific Squid', lon: 155.0, lat: 42.0, vessels: '300+', risk: 'major', activity: 'Squid jigging fleet' },
-    { name: 'Strait of Hormuz', lon: 56.5, lat: 26.5, vessels: '50+', risk: 'major', activity: 'Tanker anchorage' },
-    { name: 'Bering Sea', lon: -175.0, lat: 57.0, vessels: '80+', risk: 'moderate', activity: 'Pollock fishery' },
-  ];
-
-  return hotspots.map((h, i) => ({
-    id: `fishing-${i}`,
-    source: 'global-fishing-watch',
-    title: `🐟 ${h.name} (${h.vessels} vessels)`,
-    severity: h.risk as OmniEvent['severity'],
-    eventType: 'maritime' as const,
-    timestamp: new Date().toISOString(),
-    coordinates: { longitude: h.lon, latitude: h.lat },
-    metadata: {
-      vesselCount: h.vessels,
-      activity: h.activity,
-      dataset: 'Global Fishing Watch'
-    }
-  }));
-}
-
-// Prediction Markets — Polymarket geopolitical odds (from Shadowbroker)
 export async function fetchPredictionMarkets(): Promise<OmniEvent[]> {
-  try {
-    const url = 'https://clob.polymarket.com/markets?limit=10&order=volume&ascending=false&tag=politics';
-    const response = await fetch(url, {
-      headers: { 'Accept': 'application/json' },
-      signal: AbortSignal.timeout(8000)
-    });
-    if (!response.ok) return getStaticPredictions();
-
-    const data = await response.json() as any;
-    const events: OmniEvent[] = [];
-    const markets = Array.isArray(data) ? data : data.data || [];
-
-    for (const market of markets.slice(0, 10)) {
-      if (!market.question) continue;
-
-      const prob = market.tokens?.[0]?.price || market.outcomePrices?.[0] || 0;
-      const probPct = (parseFloat(prob) * 100).toFixed(0);
-
-      events.push({
-        id: `poly-${market.condition_id || market.id || Math.random().toString(36).slice(2)}`,
-        source: 'polymarket',
-        title: `📊 ${market.question} (${probPct}%)`,
-        severity: parseFloat(prob) > 0.7 ? 'major' : 'minor' as OmniEvent['severity'],
-        eventType: 'economics' as const,
-        timestamp: new Date().toISOString(),
-        coordinates: { longitude: -74.0, latitude: 40.71 }, // NYC
-        metadata: {
-          probability: `${probPct}%`,
-          volume: market.volume || market.volumeNum,
-          question: market.question
-        }
-      });
-    }
-    console.log(`[Polymarket] Fetched ${events.length} prediction markets.`);
-    return events.length > 0 ? events : getStaticPredictions();
-  } catch (err) {
-    console.warn('[Polymarket] Error:', err);
-    return getStaticPredictions();
-  }
-}
-
-function getStaticPredictions(): OmniEvent[] {
-  return [
-    { id: 'pred-1', source: 'polymarket', title: '📊 Geopolitical Risk Markets Active', severity: 'minor', eventType: 'economics' as const, timestamp: new Date().toISOString(), coordinates: { longitude: -74.0, latitude: 40.71 }, metadata: { note: 'Live feed available at polymarket.com' } },
-  ];
-}
-
-// RSS Intelligence News Feed — aggregated OSINT RSS (from Shadowbroker)
-export async function fetchRSSIntel(): Promise<OmniEvent[]> {
-  const feeds = [
-    { url: 'https://feeds.bbci.co.uk/news/world/rss.xml', source: 'BBC World' },
-    { url: 'https://rss.nytimes.com/services/xml/rss/nyt/World.xml', source: 'NYT World' },
-    { url: 'https://feeds.reuters.com/reuters/worldNews', source: 'Reuters' },
-  ];
-
+  const data = await fetchJson<any>(
+    'https://gamma-api.polymarket.com/markets?active=true&closed=false&limit=20&order=volume24hr&ascending=false',
+    { headers: { Accept: 'application/json' } },
+    15000,
+  );
+  const markets = Array.isArray(data) ? data : data?.data || [];
   const events: OmniEvent[] = [];
-
-  for (const feed of feeds) {
+  for (const market of markets.slice(0, 20)) {
+    const question = String(market?.question || '').trim();
+    const id = market?.conditionId || market?.id;
+    if (!question || !id) continue;
+    let probability: number | null = null;
     try {
-      const response = await fetch(feed.url, { signal: AbortSignal.timeout(5000) });
-      if (!response.ok) continue;
+      const prices = typeof market.outcomePrices === 'string' ? JSON.parse(market.outcomePrices) : market.outcomePrices;
+      if (Array.isArray(prices) && prices.length > 0) probability = Number(prices[0]);
+    } catch { probability = null; }
+    const probPct = probability !== null && Number.isFinite(probability)
+      ? `${(probability * 100).toFixed(0)}%`
+      : 'n/a';
+    const endDate = toIso(market.endDate || market.end_date_iso);
+    events.push({
+      id: `poly-${id}`,
+      source: 'polymarket',
+      title: `📊 ${question} (${probPct})`,
+      severity: probability !== null && probability > 0.7 ? 'major' : 'minor',
+      eventType: 'economics',
+      coordinates: null,
+      timestamp: new Date().toISOString(),
+      sourceTimestamp: null,
+      metadata: {
+        probability: probPct,
+        volume24hr: market.volume24hr,
+        liquidity: market.liquidity,
+        endDate,
+        url: market.slug ? `https://polymarket.com/event/${market.slug}` : undefined,
+        note: 'No map marker: prediction markets are not geolocated',
+      },
+    });
+  }
+  return events;
+}
 
-      const text = await response.text();
-      // Simple XML parsing for RSS items
-      const items = text.match(/<item>[\s\S]*?<\/item>/g) || [];
+const RSS_FEEDS = [
+  { id: 'bbc', name: 'BBC World', url: 'https://feeds.bbci.co.uk/news/world/rss.xml' },
+  { id: 'guardian', name: 'The Guardian World', url: 'https://www.theguardian.com/world/rss' },
+  { id: 'aljazeera', name: 'Al Jazeera', url: 'https://www.aljazeera.com/xml/rss/all.xml' },
+];
 
-      for (const item of items.slice(0, 3)) {
-        const titleMatch = item.match(/<title><!\[CDATA\[(.*?)\]\]>|<title>(.*?)<\/title>/);
-        const title = titleMatch?.[1] || titleMatch?.[2] || '';
-        if (!title) continue;
+const CONFLICT_KEYWORDS = /war|attack|military|bomb|strike|troops|conflict|weapon|missile|terror|kill|dead|invasion|offensive|ceasefire/i;
 
-        // Check for conflict-related keywords
-        const isConflict = /war|attack|military|bomb|strike|troops|conflict|weapon|missile|terror|kill|dead/i.test(title);
-        if (!isConflict) continue;
+export function parseRssItems(xml: string, limit = 3): Array<{ title: string; link: string; pubDate: string | null }> {
+  const items = xml.match(/<item[\s>][\s\S]*?<\/item>/g) || [];
+  const out: Array<{ title: string; link: string; pubDate: string | null }> = [];
+  for (const item of items.slice(0, limit)) {
+    const titleMatch = item.match(/<title[^>]*>(?:<!\[CDATA\[(.*?)\]\]>|(.*?))<\/title>/s);
+    const title = (titleMatch?.[1] || titleMatch?.[2] || '').trim();
+    const linkMatch = item.match(/<link[^>]*>(?:<!\[CDATA\[(.*?)\]\]>|(.*?))<\/link>/s);
+    const link = (linkMatch?.[1] || linkMatch?.[2] || '').trim();
+    const dateMatch = item.match(/<pubDate[^>]*>(.*?)<\/pubDate>/s);
+    if (!title) continue;
+    out.push({ title, link, pubDate: toIso(dateMatch?.[1]) });
+  }
+  return out;
+}
 
+export async function fetchRSSIntel(): Promise<OmniEvent[]> {
+  const events: OmniEvent[] = [];
+  const failures: string[] = [];
+  for (const feed of RSS_FEEDS) {
+    try {
+      const res = await fetchWithTimeout(feed.url, { headers: { Accept: 'application/rss+xml, application/xml' } }, 10000);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const items = parseRssItems(await res.text(), 5);
+      for (const item of items) {
+        if (!CONFLICT_KEYWORDS.test(item.title)) continue;
         events.push({
-          id: `rss-${feed.source}-${title.slice(0, 20).replace(/\s/g, '-')}`,
-          source: `rss(${feed.source})`,
-          title: title,
+          id: `rss-${hashId(feed.id, item.title, item.link)}`,
+          source: `rss(${feed.id})`,
+          title: `📰 ${item.title}`,
           severity: 'moderate',
-          eventType: 'conflict' as const,
-          timestamp: new Date().toISOString(),
-          coordinates: { longitude: 0, latitude: 0 }, // No geolocation from RSS
-          metadata: { feedSource: feed.source }
+          eventType: 'news',
+          coordinates: null,
+          timestamp: item.pubDate || new Date().toISOString(),
+          sourceTimestamp: item.pubDate,
+          metadata: {
+            feed: feed.name,
+            url: item.link,
+            note: 'Headline only; no geolocation available from RSS',
+          },
         });
       }
-    } catch {}
+    } catch (err) {
+      failures.push(`${feed.name}: ${(err as Error).message}`);
+    }
   }
-
-  console.log(`[RSS] Fetched ${events.length} conflict-related headlines.`);
+  if (events.length === 0 && failures.length === RSS_FEEDS.length) {
+    throw new Error(`All RSS feeds failed: ${failures.join('; ')}`);
+  }
   return events;
 }

@@ -1,53 +1,58 @@
-import { OmniEvent } from './usgs';
+import { fetchWithTimeout, hashId, polygonCentroid, toIso } from '../sources/helpers';
+import type { OmniEvent, Severity } from '../types';
+
+export const NOAA_ALERT_CAP = 50;
+
+export function noaaSeverity(severity: string | undefined): Severity {
+  if (severity === 'Extreme') return 'critical';
+  if (severity === 'Severe') return 'major';
+  if (severity === 'Moderate') return 'moderate';
+  return 'minor';
+}
+
+export function normalizeNoaaAlerts(payload: any, cap = NOAA_ALERT_CAP): OmniEvent[] {
+  const events: OmniEvent[] = [];
+  for (const feature of payload?.features || []) {
+    const props = feature?.properties;
+    if (!props) continue;
+    const geometry = feature?.geometry;
+    let coordinates = null;
+    if (geometry && (geometry.type === 'Polygon' || geometry.type === 'MultiPolygon')) {
+      coordinates = polygonCentroid(geometry.coordinates);
+    }
+    const effective = toIso(props.effective) || toIso(props.sent) || null;
+    events.push({
+      id: `noaa-${props.id || hashId(props.event, props.areaDesc, effective)}`,
+      source: 'noaa-weather',
+      title: props.event || 'Severe Weather Alert',
+      severity: noaaSeverity(props.severity),
+      eventType: 'weather',
+      coordinates,
+      timestamp: effective || new Date().toISOString(),
+      sourceTimestamp: effective,
+      metadata: {
+        headline: props.headline,
+        certainty: props.certainty,
+        urgency: props.urgency,
+        area: props.areaDesc,
+        expires: toIso(props.expires),
+      },
+    });
+  }
+  const order: Record<Severity, number> = { critical: 3, major: 2, moderate: 1, minor: 0 };
+  events.sort((a, b) => {
+    const bySeverity = order[b.severity] - order[a.severity];
+    if (bySeverity !== 0) return bySeverity;
+    return new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
+  });
+  return events.slice(0, cap);
+}
 
 export async function fetchWeatherAlerts(): Promise<OmniEvent[]> {
-  try {
-    const response = await fetch('https://api.weather.gov/alerts/active', {
-      headers: { 'User-Agent': 'OmniWatch/1.0 (admin@omniwatch.local)' }
-    });
-    if (!response.ok) return [];
-    
-    const data = await response.json() as any;
-    const events: OmniEvent[] = [];
-    
-    for (const feature of data.features || []) {
-      if (!feature.geometry || feature.geometry.type !== 'Polygon') continue;
-      
-      // Simple centroid approximation for polygon
-      const coords = feature.geometry.coordinates[0][0];
-      if (!coords) continue;
-      
-      const props = feature.properties;
-      
-      let severity: 'minor' | 'moderate' | 'major' | 'critical' = 'minor';
-      if (props.severity === 'Severe') severity = 'major';
-      if (props.severity === 'Extreme') severity = 'critical';
-      if (props.severity === 'Moderate') severity = 'moderate';
-      
-      events.push({
-        id: feature.id || `noaa-${Date.now()}-${Math.random()}`,
-        source: 'noaa',
-        title: props.event || 'Severe Weather Alert',
-        severity,
-        coordinates: {
-          longitude: coords[0],
-          latitude: coords[1]
-        },
-        timestamp: props.effective || new Date().toISOString(),
-        eventType: 'fire', // using fire icon as generic warning for now, or map it properly in frontend
-        metadata: {
-          headline: props.headline,
-          description: props.description,
-          certainty: props.certainty
-        }
-      });
-      // Override event type to specific weather event
-      events[events.length - 1].eventType = 'weather' as any;
-    }
-    
-    return events;
-  } catch (error) {
-    console.error('[NOAA] Error fetching weather alerts:', error);
-    return [];
-  }
+  const res = await fetchWithTimeout('https://api.weather.gov/alerts/active', {
+    headers: { Accept: 'application/geo+json' },
+  }, 12000);
+  if (!res.ok) throw new Error(`NOAA alerts request failed: HTTP ${res.status}`);
+  const payload = await res.json();
+  return normalizeNoaaAlerts(payload);
 }

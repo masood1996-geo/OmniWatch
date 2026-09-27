@@ -1,44 +1,58 @@
-import { OmniEvent } from './usgs';
+import { fetchJson, hashId, toIso } from '../sources/helpers';
+import type { OmniEvent } from '../types';
+
+const DOC_API = 'https://api.gdeltproject.org/api/v2/doc/doc';
+const QUERY = '(military OR conflict OR attack OR troops) sourcelang:english';
+
+export function parseGdeltDate(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const match = value.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z?$/);
+  if (!match) return toIso(value);
+  const [, y, mo, d, h, mi, s] = match;
+  const date = new Date(Date.UTC(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), Number(s)));
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+export function normalizeGdeltArticles(payload: any): OmniEvent[] {
+  const articles = payload?.articles;
+  if (!Array.isArray(articles)) return [];
+  const events: OmniEvent[] = [];
+  for (const article of articles) {
+    const title = String(article?.title || '').trim();
+    const url = String(article?.url || '').trim();
+    if (!title || !url) continue;
+    const seendate = parseGdeltDate(article?.seendate) || new Date().toISOString();
+    events.push({
+      id: `gdelt-${hashId(title, url, seendate)}`,
+      source: 'gdelt',
+      title,
+      severity: 'moderate',
+      eventType: 'conflict',
+      coordinates: null,
+      timestamp: seendate,
+      sourceTimestamp: seendate,
+      metadata: {
+        url,
+        domain: article?.domain,
+        language: article?.language,
+        note: 'GDELT DOC 2.0 article; no geocoding available from this endpoint',
+      },
+    });
+  }
+  return events;
+}
 
 export async function fetchConflictEvents(): Promise<OmniEvent[]> {
-  const fallbackEvents: OmniEvent[] = [
-    { id: 'gdelt-fb-1', source: 'gdelt(mirror)', title: 'Armed Drones Detected near Red Sea', severity: 'critical', coordinates: { longitude: 41.0, latitude: 16.0 }, timestamp: new Date().toISOString(), eventType: 'conflict', metadata: { domain: 'reuters.com' } },
-    { id: 'gdelt-fb-2', source: 'gdelt(mirror)', title: 'Artillery Fire Reported in Donbas', severity: 'critical', coordinates: { longitude: 37.8, latitude: 48.0 }, timestamp: new Date().toISOString(), eventType: 'conflict', metadata: { domain: 'apnews.com' } },
-    { id: 'gdelt-fb-3', source: 'gdelt(mirror)', title: 'Military Assets Mobilized in South China Sea', severity: 'major', coordinates: { longitude: 114.0, latitude: 14.0 }, timestamp: new Date().toISOString(), eventType: 'conflict', metadata: { domain: 'bbc.com' } }
-  ];
-
-  try {
-    // Attempt standard GEO v2. Note: GDELT geo endpoint has severe rate-limits and SSL instability (flapping 404/SSL cert issues). We use HTTP first.
-    const url = 'http://api.gdeltproject.org/api/v2/geo/geo?query=military%20OR%20troops%20OR%20rebel%20OR%20attack%20OR%20conflict&format=geojson';
-    const response = await fetch(url, { signal: AbortSignal.timeout(5000) });
-    if (!response.ok) return fallbackEvents;
-    
-    const data = await response.json() as any;
-    const events: OmniEvent[] = [];
-    
-    if (!data.features || data.features.length === 0) return fallbackEvents;
-    
-    for (const feature of data.features) {
-      events.push({
-        id: `gdelt-${Date.now()}-${Math.floor(Math.random()*10000)}`,
-        source: 'gdelt',
-        title: feature.properties.name || 'Geopolitical Incident',
-        severity: 'major',
-        coordinates: {
-          longitude: feature.geometry.coordinates[0],
-          latitude: feature.geometry.coordinates[1],
-        },
-        timestamp: new Date().toISOString(),
-        eventType: 'conflict',
-        metadata: {
-          url: feature.properties.url,
-          domain: feature.properties.domain
-        }
-      });
+  const url = `${DOC_API}?query=${encodeURIComponent(QUERY)}&mode=artlist&maxrecords=50&format=json&sort=datedesc`;
+  let lastError: Error | null = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const payload = await fetchJson<any>(url, {}, 12000);
+      return normalizeGdeltArticles(payload);
+    } catch (err) {
+      lastError = err as Error;
+      await new Promise(r => setTimeout(r, 1500 * (attempt + 1)));
     }
-    return events;
-  } catch (err) {
-    console.warn('[GDELT] Geo API unavailable or timeout. Using redundant mirror streams.');
-    return fallbackEvents;
   }
+  throw new Error(`GDELT DOC API unavailable after retries: ${lastError?.message || 'unknown error'}`);
 }

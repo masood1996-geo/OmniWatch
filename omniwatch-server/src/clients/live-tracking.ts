@@ -1,7 +1,8 @@
-import { OmniEvent } from './usgs';
-
-// Persistent live tracking for aircraft + vessels
-// Updates every 15 seconds for real-time movement
+import { config } from '../config';
+import { fetchOpenSkyStates, hasOpenSkyCredentials } from './opensky';
+import type { AisPosition } from './ais-client';
+import { ensureAisStarted, getAisClient, stopAis } from './ais-manager';
+import type { FetchClass } from '../types';
 
 export interface LiveTrack {
   id: string;
@@ -10,128 +11,174 @@ export interface LiveTrack {
   lat: number;
   lon: number;
   heading: number;
-  speed: number; // knots
-  altitude?: number; // feet
+  speed: number;
+  altitude?: number;
   origin?: string;
   onGround?: boolean;
   timestamp: number;
+  mmsi?: string;
 }
 
-let liveBuffer: LiveTrack[] = [];
-let lastFetch = 0;
-const REFRESH_INTERVAL = 15000; // 15 seconds
-
-export function getLiveTracks(): LiveTrack[] {
-  return liveBuffer;
+export interface LiveClassStatus {
+  fetchClass: FetchClass;
+  provider: string;
+  license: string;
+  count: number;
+  note?: string;
+  lastSuccessAt: string | null;
+  stale: boolean;
 }
 
-export async function refreshLiveTracks(): Promise<LiveTrack[]> {
-  const now = Date.now();
-  if (now - lastFetch < REFRESH_INTERVAL - 1000) return liveBuffer;
-  lastFetch = now;
-
-  const [aircraft, vessels] = await Promise.allSettled([
-    fetchLiveAircraft(),
-    fetchLiveVessels()
-  ]);
-
-  const tracks: LiveTrack[] = [];
-  if (aircraft.status === 'fulfilled') tracks.push(...aircraft.value);
-  if (vessels.status === 'fulfilled') tracks.push(...vessels.value);
-
-  liveBuffer = tracks;
-  return tracks;
+export interface LiveTrackingSnapshot {
+  tracks: LiveTrack[];
+  aircraft: LiveClassStatus;
+  vessels: LiveClassStatus;
 }
 
-async function fetchLiveAircraft(): Promise<LiveTrack[]> {
-  try {
-    const res = await fetch('https://opensky-network.org/api/states/all', {
-      signal: AbortSignal.timeout(12000)
-    });
-    if (!res.ok) return [];
-    const data = await res.json() as any;
-    if (!data.states) return [];
+const AIRCRAFT_REFRESH_MS = 15000;
+let aircraftTracks: LiveTrack[] = [];
+let vesselTracks: LiveTrack[] = [];
+let lastAircraftFetch = 0;
+let aircraftInFlight: Promise<void> | null = null;
+let lastAircraftSuccessAt: string | null = null;
+let aircraftNote: string | undefined;
+let aircraftError = false;
 
-    // Get 200 airborne aircraft with valid positions
-    const valid = data.states.filter((s: any[]) =>
-      s[5] != null && s[6] != null && !s[8] // not on ground
-    ).slice(0, 200);
-
-    return valid.map((s: any[]) => ({
-      id: `aircraft-${s[0]}`,
-      type: 'aircraft' as const,
-      callsign: (s[1] || '').trim() || s[0],
-      lat: s[6],
-      lon: s[5],
-      heading: s[10] || 0,
-      speed: s[9] ? Math.round(s[9] * 1.944) : 0, // m/s → kts
-      altitude: s[7] ? Math.round(s[7] * 3.281) : 0, // m → ft
-      origin: s[2] || 'Unknown',
-      onGround: !!s[8],
-      timestamp: Date.now()
-    }));
-  } catch (e) {
-    console.warn('[LiveTrack] Aircraft fetch failed:', (e as Error).message);
-    return [];
+function aircraftStatus(): LiveClassStatus {
+  const canLive = (hasOpenSkyCredentials() || config.opensky.allowAnonymous) && Boolean(config.opensky.bbox);
+  const fetchClass: FetchClass = canLive ? 'live' : 'disabled';
+  let note = aircraftNote;
+  if (!canLive) {
+    note = !hasOpenSkyCredentials()
+      ? 'OpenSky OAuth2 credentials not configured (OPENSKY_CLIENT_ID/SECRET); live 15s refresh disabled. Anonymous mode is credit-metered and blocked on many cloud hosts.'
+      : 'OPENSKY_BBOX required for live refresh so credit use stays bounded.';
   }
+  return {
+    fetchClass,
+    provider: 'OpenSky Network',
+    license: 'OpenSky Network terms (non-commercial, attribution)',
+    count: aircraftTracks.length,
+    note,
+    lastSuccessAt: lastAircraftSuccessAt,
+    stale: fetchClass === 'live' && aircraftError,
+  };
 }
 
-async function fetchLiveVessels(): Promise<LiveTrack[]> {
-  // For AIS data, use the data we already collected in the sweep
-  // Plus add major shipping chokepoint vessels
-  const chokepoints: LiveTrack[] = [
-    // Strait of Hormuz traffic
-    { id: 'vessel-hormuz-1', type: 'vessel', callsign: 'VLCC Tanker', lat: 26.56, lon: 56.25, heading: 320, speed: 12, timestamp: Date.now() },
-    { id: 'vessel-hormuz-2', type: 'vessel', callsign: 'Container Ship', lat: 26.48, lon: 56.31, heading: 145, speed: 15, timestamp: Date.now() },
-    // Strait of Malacca
-    { id: 'vessel-malacca-1', type: 'vessel', callsign: 'Bulk Carrier', lat: 1.25, lon: 103.85, heading: 290, speed: 11, timestamp: Date.now() },
-    { id: 'vessel-malacca-2', type: 'vessel', callsign: 'LNG Tanker', lat: 2.10, lon: 102.50, heading: 105, speed: 14, timestamp: Date.now() },
-    // Suez Canal approach
-    { id: 'vessel-suez-1', type: 'vessel', callsign: 'Container Ship', lat: 30.45, lon: 32.35, heading: 180, speed: 8, timestamp: Date.now() },
-    { id: 'vessel-suez-2', type: 'vessel', callsign: 'Car Carrier', lat: 29.95, lon: 32.58, heading: 0, speed: 7, timestamp: Date.now() },
-    // Panama Canal
-    { id: 'vessel-panama-1', type: 'vessel', callsign: 'Panamax Carrier', lat: 9.10, lon: -79.68, heading: 330, speed: 5, timestamp: Date.now() },
-    // Bab el-Mandeb (Yemen/Djibouti)
-    { id: 'vessel-bab-1', type: 'vessel', callsign: 'Oil Tanker', lat: 12.58, lon: 43.32, heading: 165, speed: 13, timestamp: Date.now() },
-    { id: 'vessel-bab-2', type: 'vessel', callsign: 'Cargo Ship', lat: 12.72, lon: 43.25, heading: 340, speed: 10, timestamp: Date.now() },
-    // South China Sea
-    { id: 'vessel-scs-1', type: 'vessel', callsign: 'Fishing Fleet', lat: 15.50, lon: 114.50, heading: 90, speed: 6, timestamp: Date.now() },
-    { id: 'vessel-scs-2', type: 'vessel', callsign: 'Naval Patrol', lat: 16.20, lon: 112.80, heading: 220, speed: 18, timestamp: Date.now() },
-    // English Channel
-    { id: 'vessel-channel-1', type: 'vessel', callsign: 'Ferry', lat: 50.95, lon: 1.50, heading: 250, speed: 22, timestamp: Date.now() },
-    { id: 'vessel-channel-2', type: 'vessel', callsign: 'Container Ship', lat: 51.10, lon: 1.65, heading: 70, speed: 16, timestamp: Date.now() },
-    // Black Sea
-    { id: 'vessel-black-1', type: 'vessel', callsign: 'Grain Carrier', lat: 43.50, lon: 31.00, heading: 200, speed: 11, timestamp: Date.now() },
-    // Baltic Sea
-    { id: 'vessel-baltic-1', type: 'vessel', callsign: 'RoRo Ferry', lat: 57.70, lon: 17.80, heading: 45, speed: 19, timestamp: Date.now() },
-  ];
+function vesselStatus(now: number): LiveClassStatus {
+  if (!config.aisstream.apiKey) {
+    return {
+      fetchClass: 'disabled',
+      provider: 'AISStream.io',
+      license: 'AISStream terms (free tier, attribution)',
+      count: 0,
+      note: 'AISSTREAM_API_KEY not configured; no vessel positions are shown. Free key: https://aisstream.io',
+      lastSuccessAt: null,
+      stale: false,
+    };
+  }
+  const client = getAisClient();
+  const positions = client ? client.snapshot(now, config.aisstream.snapshotTtlMs) : [];
+  const connected = client?.isConnected() ?? false;
+  return {
+    fetchClass: 'live',
+    provider: 'AISStream.io',
+    license: 'AISStream terms (free tier, attribution)',
+    count: positions.length,
+    note: connected
+      ? `Managed WebSocket snapshot; positions expire after ${Math.round(config.aisstream.snapshotTtlMs / 60000)} min`
+      : 'WebSocket not connected; showing last known positions within TTL',
+    lastSuccessAt: connected && client ? new Date(client.lastSubscribedAt() || Date.now()).toISOString() : null,
+    stale: !connected,
+  };
+}
 
-  // Simulate slight position drift for each vessel on each call
-  const drift = () => (Math.random() - 0.5) * 0.02;
-  return chokepoints.map(v => ({
-    ...v,
-    lat: v.lat + drift(),
-    lon: v.lon + drift(),
-    heading: v.heading + (Math.random() - 0.5) * 5,
-    timestamp: Date.now()
+function toVesselTracks(positions: AisPosition[]): LiveTrack[] {
+  return positions.map(p => ({
+    id: `vessel-${p.mmsi}`,
+    type: 'vessel' as const,
+    callsign: p.name || p.mmsi,
+    lat: p.lat,
+    lon: p.lon,
+    heading: p.heading || p.cog || 0,
+    speed: Math.round(p.sog),
+    timestamp: p.receivedAt,
+    mmsi: p.mmsi,
   }));
 }
 
-// Start background live tracking loop
-let liveInterval: NodeJS.Timeout | null = null;
-
-export function startLiveTracking() {
-  if (liveInterval) return;
-  console.log('[LiveTrack] Starting live aircraft/vessel tracking (15s refresh)...');
-  refreshLiveTracks(); // Immediate first fetch
-  liveInterval = setInterval(() => {
-    refreshLiveTracks().catch(() => {});
-  }, REFRESH_INTERVAL);
+async function refreshAircraft(): Promise<void> {
+  if (aircraftInFlight) return aircraftInFlight;
+  if (!((hasOpenSkyCredentials() || config.opensky.allowAnonymous) && config.opensky.bbox)) return;
+  aircraftInFlight = (async () => {
+    try {
+      const { states } = await fetchOpenSkyStates({
+        bbox: config.opensky.bbox,
+        allowAnonymous: config.opensky.allowAnonymous,
+        timeoutMs: 12000,
+      });
+      aircraftTracks = states.filter(s => !s.onGround).slice(0, 200).map(s => ({
+        id: `aircraft-${s.icao24}`,
+        type: 'aircraft' as const,
+        callsign: s.callsign || s.icao24,
+        lat: s.latitude,
+        lon: s.longitude,
+        heading: s.heading || 0,
+        speed: s.velocity !== null ? Math.round(s.velocity * 1.944) : 0,
+        altitude: s.baroAltitude !== null ? Math.round(s.baroAltitude * 3.281) : 0,
+        origin: s.originCountry || 'Unknown',
+        onGround: s.onGround,
+        timestamp: Date.now(),
+      }));
+      lastAircraftSuccessAt = new Date().toISOString();
+      aircraftError = false;
+      aircraftNote = undefined;
+      lastAircraftFetch = Date.now();
+    } catch (err) {
+      aircraftError = true;
+      aircraftNote = `Last refresh failed: ${(err as Error).message}`;
+    } finally {
+      aircraftInFlight = null;
+    }
+  })();
+  return aircraftInFlight;
 }
 
-export function stopLiveTracking() {
+export function getLiveTracks(): LiveTrack[] {
+  return [...aircraftTracks, ...vesselTracks];
+}
+
+export async function refreshLiveTracks(): Promise<LiveTrackingSnapshot> {
+  const now = Date.now();
+  if (now - lastAircraftFetch >= AIRCRAFT_REFRESH_MS) {
+    await refreshAircraft();
+  }
+  const ais = getAisClient();
+  const vesselPositions = ais
+    ? ais.snapshot(now, config.aisstream.snapshotTtlMs)
+    : [];
+  vesselTracks = toVesselTracks(vesselPositions);
+  return { tracks: getLiveTracks(), aircraft: aircraftStatus(), vessels: vesselStatus(now) };
+}
+
+let liveInterval: NodeJS.Timeout | null = null;
+
+export function startLiveTracking(): void {
+  if (config.aisstream.apiKey && !getAisClient()) {
+    ensureAisStarted();
+    console.log('[LiveTrack] Managed AISStream connection started');
+  }
+  if (liveInterval) return;
+  console.log(`[LiveTrack] Live tracking loop (${AIRCRAFT_REFRESH_MS / 1000}s aircraft refresh)`);
+  refreshLiveTracks().catch(() => {});
+  liveInterval = setInterval(() => {
+    refreshLiveTracks().catch(() => {});
+  }, AIRCRAFT_REFRESH_MS);
+}
+
+export function stopLiveTracking(): void {
   if (liveInterval) {
     clearInterval(liveInterval);
     liveInterval = null;
   }
+  stopAis();
 }

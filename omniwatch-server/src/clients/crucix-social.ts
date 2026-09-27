@@ -1,159 +1,197 @@
-import { OmniEvent } from './usgs';
+import { config } from '../config';
+import { fetchJson, fetchWithTimeout, hashId, toIso } from '../sources/helpers';
+import type { OmniEvent } from '../types';
 
-// Reddit OSINT — r/worldnews + r/geopolitics (from Crucix reddit.mjs)
-export async function fetchRedditOSINT(): Promise<OmniEvent[]> {
-  try {
-    const subs = ['worldnews', 'geopolitics'];
-    const events: OmniEvent[] = [];
-    for (const sub of subs) {
-      try {
-        const url = `https://www.reddit.com/r/${sub}/hot.json?limit=5`;
-        const res = await fetch(url, {
-          headers: { 'User-Agent': 'OmniWatch/1.0' },
-          signal: AbortSignal.timeout(8000)
-        });
-        if (!res.ok) continue;
-        const data = await res.json() as any;
-        for (const post of (data.data?.children || []).slice(0, 5)) {
-          const d = post.data;
-          if (!d?.title) continue;
-          const isHot = d.score > 1000;
-          events.push({
-            id: `reddit-${d.id}`,
-            source: `reddit(r/${sub})`,
-            title: `💬 ${d.title.slice(0, 120)}`,
-            severity: isHot ? 'moderate' as const : 'minor' as const,
-            eventType: 'social' as const,
-            timestamp: new Date(d.created_utc * 1000).toISOString(),
-            coordinates: { longitude: 0, latitude: 0 },
-            metadata: { score: d.score, comments: d.num_comments, subreddit: sub, url: `https://reddit.com${d.permalink}` }
-          });
-        }
-      } catch {}
-    }
-    console.log(`[Reddit] Fetched ${events.length} OSINT posts.`);
-    return events;
-  } catch (e) { console.warn('[Reddit] Error:', e); return []; }
+let redditToken: { value: string; expiresAt: number } | null = null;
+
+export function resetRedditToken(): void {
+  redditToken = null;
 }
 
-// Bluesky Social OSINT (from Crucix bluesky.mjs)
-export async function fetchBlueskyOSINT(): Promise<OmniEvent[]> {
-  try {
-    const url = 'https://public.api.bsky.app/xrpc/app.bsky.feed.searchPosts?q=breaking+news+conflict&limit=5&sort=top';
-    const res = await fetch(url, {
-      headers: { 'Accept': 'application/json' },
-      signal: AbortSignal.timeout(8000)
-    });
-    if (!res.ok) return [];
-    const data = await res.json() as any;
-    const events: OmniEvent[] = [];
-    for (const post of (data.posts || []).slice(0, 5)) {
-      const text = post.record?.text || '';
-      if (!text) continue;
+async function getRedditToken(): Promise<string> {
+  if (redditToken && Date.now() < redditToken.expiresAt - 30000) return redditToken.value;
+  const basic = Buffer.from(`${config.keys.redditClientId}:${config.keys.redditClientSecret}`).toString('base64');
+  const res = await fetchWithTimeout('https://www.reddit.com/api/v1/access_token', {
+    method: 'POST',
+    headers: {
+      Authorization: `Basic ${basic}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: 'grant_type=client_credentials',
+  }, 15000);
+  if (!res.ok) throw new Error(`Reddit token request failed: HTTP ${res.status}`);
+  const data = await res.json() as { access_token?: string; expires_in?: number };
+  if (!data.access_token) throw new Error('Reddit token response missing access_token');
+  redditToken = { value: data.access_token, expiresAt: Date.now() + (Number(data.expires_in) || 3600) * 1000 };
+  return redditToken.value;
+}
+
+export async function fetchRedditOSINT(): Promise<OmniEvent[]> {
+  const token = await getRedditToken();
+  const subs = ['worldnews', 'geopolitics'];
+  const events: OmniEvent[] = [];
+  for (const sub of subs) {
+    const data = await fetchJson<any>(
+      `https://oauth.reddit.com/r/${sub}/hot?limit=5`,
+      { headers: { Authorization: `Bearer ${token}` } },
+      12000,
+    );
+    for (const post of (data?.data?.children || []).slice(0, 5)) {
+      const d = post.data;
+      if (!d?.title || !d?.id) continue;
+      const created = toIso(d.created_utc);
       events.push({
-        id: `bsky-${post.uri?.split('/').pop() || Math.random().toString(36).slice(2)}`,
-        source: 'bluesky',
-        title: `🦋 ${text.slice(0, 120)}`,
-        severity: 'minor',
-        eventType: 'social' as const,
-        timestamp: post.record?.createdAt || new Date().toISOString(),
-        coordinates: { longitude: 0, latitude: 0 },
-        metadata: { author: post.author?.handle, likes: post.likeCount, reposts: post.repostCount }
+        id: `reddit-${d.id}`,
+        source: `reddit(r/${sub})`,
+        title: `💬 ${String(d.title).slice(0, 120)}`,
+        severity: d.score > 1000 ? 'moderate' : 'minor',
+        eventType: 'social',
+        coordinates: null,
+        timestamp: created || new Date().toISOString(),
+        sourceTimestamp: created,
+        metadata: {
+          score: d.score,
+          comments: d.num_comments,
+          subreddit: sub,
+          url: `https://reddit.com${d.permalink}`,
+        },
       });
     }
-    console.log(`[Bluesky] Fetched ${events.length} OSINT posts.`);
-    return events;
-  } catch (e) { console.warn('[Bluesky] Error:', e); return []; }
+  }
+  return events;
 }
 
-// EIA Energy Data (from Crucix eia.mjs) — oil/gas inventory tracking
+export async function fetchBlueskyOSINT(): Promise<OmniEvent[]> {
+  const data = await fetchJson<any>(
+    'https://api.bsky.app/xrpc/app.bsky.feed.searchPosts?q=breaking+news+conflict&limit=10&sort=top',
+    { headers: { Accept: 'application/json' } },
+    12000,
+  );
+  const posts = data?.posts || [];
+  const events: OmniEvent[] = [];
+  for (const post of posts) {
+    const text = post.record?.text || '';
+    const uri = post.uri || '';
+    if (!text || !uri) continue;
+    const created = toIso(post.record?.createdAt);
+    events.push({
+      id: `bsky-${hashId(uri)}`,
+      source: 'bluesky',
+      title: `🦋 ${String(text).slice(0, 120)}`,
+      severity: 'minor',
+      eventType: 'social',
+      coordinates: null,
+      timestamp: created || new Date().toISOString(),
+      sourceTimestamp: created,
+      metadata: { author: post.author?.handle, likes: post.likeCount, reposts: post.repostCount },
+    });
+  }
+  return events;
+}
+
 export async function fetchEIAEnergy(): Promise<OmniEvent[]> {
-  // EIA requires API key for live data — provide curated energy intel
-  const energyData = [
-    { name: 'Crude Oil WTI Spot', value: 'Live via Yahoo Finance', lon: -95.99, lat: 36.15, type: 'Oil' },
-    { name: 'Strategic Petroleum Reserve', value: '~370M barrels', lon: -93.47, lat: 30.20, type: 'SPR' },
-    { name: 'Henry Hub Nat Gas', value: 'Live via Yahoo Finance', lon: -91.68, lat: 30.13, type: 'Gas' },
-    { name: 'Cushing OK Storage Hub', value: 'Key WTI delivery point', lon: -96.77, lat: 35.99, type: 'Oil Storage' },
-    { name: 'LOOP Terminal', value: 'Largest US oil port', lon: -90.03, lat: 28.88, type: 'Port' },
-  ];
-  return energyData.map((e, i) => ({
-    id: `eia-${i}`,
+  const url = 'https://api.eia.gov/v2/petroleum/stoc/wstk/data/?frequency=weekly&data[0]=value&facets[series][]=WCRSTUS1&sort[0][column]=period&sort[0][direction]=desc&length=1';
+  const data = await fetchJson<any>(`${url}&api_key=${encodeURIComponent(config.keys.eia)}`, {}, 20000);
+  const row = data?.response?.data?.[0];
+  if (!row) throw new Error('EIA returned no data rows');
+  const value = Number(row.value);
+  return [{
+    id: 'eia-crude-stocks',
     source: 'eia',
-    title: `⛽ ${e.name}: ${e.value}`,
-    severity: 'minor' as OmniEvent['severity'],
-    eventType: 'economics' as const,
-    timestamp: new Date().toISOString(),
-    coordinates: { longitude: e.lon, latitude: e.lat },
-    metadata: { type: e.type, source: 'EIA / DOE' }
-  }));
+    title: `⛽ US crude oil stocks (weekly): ${Number.isFinite(value) ? value.toLocaleString() : row.value}`,
+    severity: 'minor',
+    eventType: 'economics',
+    coordinates: { longitude: -95.99, latitude: 36.15 },
+    timestamp: row.period || new Date().toISOString(),
+    sourceTimestamp: toIso(row.period),
+    metadata: { series: row.series, period: row.period, units: row.units, source: 'EIA API v2' },
+  }];
 }
 
-// ACLED Conflict Data (from Crucix acled.mjs) — political violence
 export async function fetchACLED(): Promise<OmniEvent[]> {
-  // ACLED requires registration — provide known active conflict zones
-  const conflicts = [
-    { name: 'Sudan Civil War', lon: 32.53, lat: 15.50, type: 'Battle', fatalities: '15,000+' },
-    { name: 'Myanmar Civil War', lon: 96.13, lat: 21.91, type: 'Armed Clash', fatalities: '6,000+' },
-    { name: 'Sahel Insurgency', lon: 2.11, lat: 13.51, type: 'Violence against civilians', fatalities: '5,000+' },
-    { name: 'Ethiopia (Amhara)', lon: 38.75, lat: 11.59, type: 'Political violence', fatalities: '2,000+' },
-    { name: 'DRC Eastern Congo', lon: 28.86, lat: -1.68, type: 'Armed Clash', fatalities: '3,000+' },
-    { name: 'Haiti Gang Violence', lon: -72.34, lat: 18.54, type: 'Violence against civilians', fatalities: '1,500+' },
-    { name: 'Colombia FARC remnants', lon: -72.90, lat: 7.12, type: 'FARC dissident activity', fatalities: '500+' },
-    { name: 'Mozambique (Cabo Delgado)', lon: 40.52, lat: -12.35, type: 'Insurgency', fatalities: '1,000+' },
-  ];
-  return conflicts.map((c, i) => ({
-    id: `acled-${i}`,
-    source: 'acled',
-    title: `⚔️ ${c.name} — ${c.type}`,
-    severity: 'critical' as OmniEvent['severity'],
-    eventType: 'conflict' as const,
-    timestamp: new Date().toISOString(),
-    coordinates: { longitude: c.lon, latitude: c.lat },
-    metadata: { type: c.type, fatalities: c.fatalities, source: 'ACLED (Armed Conflict Location & Event Data)' }
-  }));
+  const body = new URLSearchParams({
+    client_id: 'acled',
+    grant_type: 'password',
+    username: config.keys.acledEmail,
+    password: config.keys.acled,
+  });
+  const tokenRes = await fetchWithTimeout('https://acleddata.com/oauth/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: body.toString(),
+  }, 15000);
+  if (!tokenRes.ok) throw new Error(`ACLED token request failed: HTTP ${tokenRes.status}`);
+  const tokenData = await tokenRes.json() as any;
+  if (!tokenData.access_token) throw new Error('ACLED token response missing access_token');
+  const data = await fetchJson<any>(
+    'https://acleddata.com/api/acled/read?limit=20&fields=event_id|event_date|event_type|sub_event_type|country|latitude|longitude|fatalities|notes',
+    { headers: { Authorization: `Bearer ${tokenData.access_token}` } },
+    20000,
+  );
+  const rows = data?.data || [];
+  return rows.map((row: any): OmniEvent => {
+    const date = toIso(row.event_date);
+    return {
+      id: `acled-${row.event_id || hashId(row.event_date, row.country, row.notes)}`,
+      source: 'acled',
+      title: `⚔️ ${row.country}: ${row.event_type}${row.sub_event_type ? ` / ${row.sub_event_type}` : ''} (fatalities: ${row.fatalities ?? 'n/a'})`,
+      severity: Number(row.fatalities) >= 10 ? 'critical' : Number(row.fatalities) > 0 ? 'major' : 'moderate',
+      eventType: 'conflict',
+      coordinates: row.latitude && row.longitude
+        ? { longitude: Number(row.longitude), latitude: Number(row.latitude) }
+        : null,
+      timestamp: date || new Date().toISOString(),
+      sourceTimestamp: date,
+      metadata: { eventType: row.event_type, subEventType: row.sub_event_type, fatalities: row.fatalities, country: row.country, source: 'ACLED API' },
+    };
+  });
 }
 
-// USPTO Patent Intelligence (from Crucix patents.mjs) — tech threat monitoring
 export async function fetchPatentIntel(): Promise<OmniEvent[]> {
-  try {
-    const url = 'https://developer.uspto.gov/ibd-api/v1/application/publications?searchText=artificial+intelligence&start=0&rows=5';
-    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
-    if (!res.ok) return [];
-    const data = await res.json() as any;
-    const results = data.results || [];
-    return results.slice(0, 5).map((p: any, i: number) => ({
-      id: `patent-${p.patentApplicationNumber || i}`,
+  const query = encodeURIComponent(JSON.stringify({ _text_any: { patent_title: 'artificial intelligence' } }));
+  const fields = encodeURIComponent(JSON.stringify(['patent_id', 'patent_title', 'patent_date']));
+  const options = encodeURIComponent(JSON.stringify({ per_page: 5 }));
+  const data = await fetchJson<any>(
+    `https://search.patentsview.org/api/v1/patent/?q=${query}&f=${fields}&o=${options}`,
+    { headers: { 'X-Api-Key': config.keys.patentsview } },
+    20000,
+  );
+  const rows = data?.patents || [];
+  return rows.map((p: any): OmniEvent => {
+    const date = toIso(p.patent_date);
+    return {
+      id: `patent-${p.patent_id}`,
       source: 'uspto',
-      title: `📋 Patent: ${(p.inventionTitle || 'AI Patent').slice(0, 100)}`,
-      severity: 'minor' as OmniEvent['severity'],
-      eventType: 'technology' as const,
-      timestamp: p.datePublished || new Date().toISOString(),
+      title: `📋 Patent: ${String(p.patent_title || '').slice(0, 100)}`,
+      severity: 'minor',
+      eventType: 'technology',
       coordinates: { longitude: -77.04, latitude: 38.90 },
-      metadata: { applicant: p.applicantFileReference, status: p.patentApplicationTypeFormatted }
-    }));
-  } catch (e) { console.warn('[USPTO] Error:', e); return []; }
+      timestamp: date || new Date().toISOString(),
+      sourceTimestamp: date,
+      metadata: { patentId: p.patent_id, source: 'PatentsView API (USPTO)', venueNote: 'Marker at Washington DC (issuing agency)' },
+    };
+  });
 }
 
-// Cloudflare Radar — Internet traffic anomalies (from Crucix cloudflare-radar.mjs)
 export async function fetchCloudflareRadar(): Promise<OmniEvent[]> {
-  // Cloudflare Radar requires an API token for detailed data
-  // Provide critical chokepoint monitoring
-  const chokepoints = [
-    { name: 'Submarine Cable: FLAG/FALCON (Suez)', lon: 32.34, lat: 29.97, type: 'Submarine Cable' },
-    { name: 'Submarine Cable: SEA-ME-WE 6', lon: 72.88, lat: 19.08, type: 'Submarine Cable' },
-    { name: 'Submarine Cable: TAT-14 (Atlantic)', lon: -30.0, lat: 45.0, type: 'Submarine Cable' },
-    { name: 'IXP: DE-CIX Frankfurt', lon: 8.68, lat: 50.11, type: 'Internet Exchange' },
-    { name: 'IXP: LINX London', lon: -0.09, lat: 51.51, type: 'Internet Exchange' },
-    { name: 'IXP: AMS-IX Amsterdam', lon: 4.90, lat: 52.37, type: 'Internet Exchange' },
-  ];
-  return chokepoints.map((c, i) => ({
-    id: `cf-radar-${i}`,
-    source: 'cloudflare-radar',
-    title: `🌐 ${c.name}`,
-    severity: 'minor' as OmniEvent['severity'],
-    eventType: 'infrastructure' as const,
-    timestamp: new Date().toISOString(),
-    coordinates: { longitude: c.lon, latitude: c.lat },
-    metadata: { type: c.type, source: 'Cloudflare Radar / TeleGeography' }
-  }));
+  const data = await fetchJson<any>(
+    'https://api.cloudflare.com/client/v4/radar/annotations/outages?limit=10&dateRange=7d',
+    { headers: { Authorization: `Bearer ${config.keys.cloudflare}` } },
+    20000,
+  );
+  const annotations = data?.result?.annotations || [];
+  return annotations.map((a: any): OmniEvent => {
+    const date = toIso(a.startDate);
+    return {
+      id: `cf-radar-${a.id}`,
+      source: 'cloudflare-radar',
+      title: `🌐 Internet outage annotation: ${a.description || a.locations?.join(', ') || 'outage'}`,
+      severity: /major|nationwide|total/i.test(a.description || '') ? 'major' : 'moderate',
+      eventType: 'infrastructure',
+      coordinates: null,
+      timestamp: date || new Date().toISOString(),
+      sourceTimestamp: date,
+      metadata: { locations: a.locations, asns: a.asns, outageType: a.outageType, source: 'Cloudflare Radar API' },
+    };
+  });
 }

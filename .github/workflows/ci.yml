@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [master, "productize/**"]
+  pull_request:
+    branches: [master]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install (workspaces)
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Verify no hardcoded localhost API base
+        run: |
+          if grep -rn "localhost:4100" omniwatch-client/src; then
+            echo "Hardcoded API URL found"
+            exit 1
+          fi
+
+      - name: Verify no fabricated data paths
+        run: |
+          if grep -rn "Math.random" omniwatch-server/src/clients; then
+            echo "Math.random found in data clients"
+            exit 1
+          fi
+
+      - name: Secret preflight (publish_hf)
+        run: python3 publish_hf.py --check

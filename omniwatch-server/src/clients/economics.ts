@@ -9,12 +9,13 @@ export async function fetchEconomics(): Promise<OmniEvent[]> {
 
     try {
         const response = await fetch(`https://finnhub.io/api/v1/quote?symbol=^VIX&token=${key}`);
-        if (!response.ok) return [];
+        if (!response.ok) throw new Error(`Finnhub request failed: HTTP ${response.status}`);
         
-        const data = await response.json() as any;
-        const currentVix = data.c; // current price
-        
-        if (!currentVix) return [];
+        const data = await response.json() as { c?: number };
+        const currentVix = Number(data.c);
+        if (!Number.isFinite(currentVix) || currentVix <= 0) {
+          throw new Error('Finnhub returned no VIX price (free tier may not include index quotes)');
+        }
         
         return [
            {
@@ -22,14 +23,15 @@ export async function fetchEconomics(): Promise<OmniEvent[]> {
                source: 'finnhub',
                title: 'VIX Volatility Index (LIVE)',
                severity: currentVix > 20 ? 'major' : 'minor',
-               eventType: 'economics' as any,
+               eventType: 'economics',
                timestamp: new Date().toISOString(),
-               coordinates: { longitude: -87.6, latitude: 41.8 }, // Chicago board
+               sourceTimestamp: null,
+               coordinates: { longitude: -87.6, latitude: 41.8 },
                metadata: { value: currentVix.toFixed(2), trend: currentVix > 21 ? 'BEARISH PANIC' : 'STABLE' }
            }
         ];
     } catch(err) {
-        console.error('[Economics] Fetch err:', err);
-        return [];
+        console.error('[Economics] Fetch err:', (err as Error).message);
+        throw err;
     }
 }

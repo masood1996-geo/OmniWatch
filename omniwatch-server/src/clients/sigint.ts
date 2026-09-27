@@ -1,147 +1,89 @@
-import { OmniEvent } from './usgs';
+import { fetchJson, fetchWithTimeout, hashId, toIso } from '../sources/helpers';
+import type { OmniEvent } from '../types';
 
-// SatNOGS Ground Stations — Amateur satellite ground station network (from Shadowbroker)
-// Public API, no key needed
 export async function fetchSatNOGS(): Promise<OmniEvent[]> {
-  try {
-    const url = 'https://network.satnogs.org/api/stations/?format=json&status=2'; // status=2 = online
-    const response = await fetch(url, { signal: AbortSignal.timeout(8000) });
-    if (!response.ok) return [];
-
-    const data = await response.json() as any;
-    const events: OmniEvent[] = [];
-
-    for (const station of data.slice(0, 50)) {
-      if (!station.lat || !station.lng) continue;
-
-      events.push({
-        id: `satnogs-${station.id}`,
-        source: 'satnogs',
-        title: `📡 ${station.name} (SatNOGS #${station.id})`,
-        severity: 'minor',
-        eventType: 'infrastructure' as const,
-        timestamp: station.last_seen || new Date().toISOString(),
-        coordinates: { longitude: station.lng, latitude: station.lat },
-        metadata: {
-          stationId: station.id,
-          altitude: station.altitude,
-          observations: station.observations,
-          antennas: station.antenna?.map((a: any) => a.antenna_type).join(', ') || 'Unknown',
-          status: 'Online'
-        }
-      });
-    }
-    console.log(`[SatNOGS] Fetched ${events.length} ground stations.`);
-    return events;
-  } catch (err) {
-    console.warn('[SatNOGS] Error:', err);
-    return [];
+  const data = await fetchJson<any[]>(
+    'https://network.satnogs.org/api/stations/?format=json',
+    {},
+    12000,
+  );
+  if (!Array.isArray(data)) throw new Error('SatNOGS returned unexpected payload');
+  const events: OmniEvent[] = [];
+  const online = data.filter((station: any) => String(station?.status || '').toLowerCase() === 'online');
+  for (const station of online.slice(0, 50)) {
+    const lat = Number(station?.lat);
+    const lng = Number(station?.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+    const lastSeen = toIso(station.last_seen);
+    events.push({
+      id: `satnogs-${station.id}`,
+      source: 'satnogs',
+      title: `📡 ${station.name} (SatNOGS #${station.id})`,
+      severity: 'minor',
+      eventType: 'infrastructure',
+      coordinates: { longitude: lng, latitude: lat },
+      timestamp: lastSeen || new Date().toISOString(),
+      sourceTimestamp: lastSeen,
+      metadata: {
+        stationId: station.id,
+        altitude: station.altitude,
+        observations: station.observations,
+        antennas: station.antenna?.map((a: any) => a.antenna_type).join(', ') || 'Unknown',
+      },
+    });
   }
+  return events;
 }
 
-// TinyGS LoRa Satellite Ground Stations (from Shadowbroker)
-// Public API
-export async function fetchTinyGS(): Promise<OmniEvent[]> {
-  try {
-    const url = 'https://api.tinygs.com/v1/stations?status=1';
-    const response = await fetch(url, { signal: AbortSignal.timeout(8000) });
-    if (!response.ok) return [];
-
-    const data = await response.json() as any;
-    const events: OmniEvent[] = [];
-
-    const stations = Array.isArray(data) ? data : data.stations || [];
-    for (const station of stations.slice(0, 40)) {
-      if (!station.location?.[0] && !station.lat) continue;
-      const lat = station.lat || station.location?.[0];
-      const lon = station.lng || station.location?.[1];
-      if (!lat || !lon) continue;
-
-      events.push({
-        id: `tinygs-${station.name || station._id}`,
-        source: 'tinygs',
-        title: `📻 TinyGS: ${station.name || 'Station'}`,
-        severity: 'minor',
-        eventType: 'infrastructure' as const,
-        timestamp: new Date().toISOString(),
-        coordinates: { longitude: lon, latitude: lat },
-        metadata: {
-          packets: station.confirmedPackets || station.packets,
-          lastPacket: station.lastPacket,
-          modem: station.modem
-        }
-      });
-    }
-    console.log(`[TinyGS] Fetched ${events.length} LoRa stations.`);
-    return events;
-  } catch (err) {
-    console.warn('[TinyGS] Error:', err);
-    return [];
-  }
+export function parseKiwiSdrPayload(text: string): any[] {
+  let stripped = text.trim();
+  const assignment = stripped.match(/^(?:var|let|const|window\.[\w.$]+)\s+[\w.$]+\s*=\s*/);
+  if (assignment) stripped = stripped.slice(assignment[0].length);
+  stripped = stripped.replace(/;\s*$/, '').trim();
+  const jsonStart = stripped.indexOf('[');
+  const jsonEnd = stripped.lastIndexOf(']');
+  if (jsonStart < 0 || jsonEnd <= jsonStart) throw new Error('KiwiSDR list payload did not contain a JSON array');
+  const tolerant = stripped.slice(jsonStart, jsonEnd + 1).replace(/,\s*([\]}])/g, '$1');
+  const parsed = JSON.parse(tolerant);
+  if (!Array.isArray(parsed)) throw new Error('KiwiSDR list payload was not an array');
+  return parsed;
 }
 
-// KiwiSDR — Software Defined Radio receivers worldwide (from Shadowbroker)
+export function parseGpsField(gps: unknown): { latitude: number; longitude: number } | null {
+  if (!gps || typeof gps !== 'string') return null;
+  const match = gps.match(/\(?\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\)?/);
+  if (!match) return null;
+  const latitude = Number(match[1]);
+  const longitude = Number(match[2]);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+  return { latitude, longitude };
+}
+
 export async function fetchKiwiSDR(): Promise<OmniEvent[]> {
-  try {
-    const url = 'http://rx.linkfanel.net/kiwisdr_com.js';
-    const response = await fetch(url, { signal: AbortSignal.timeout(8000) });
-    if (!response.ok) return getStaticKiwiSDR();
-
-    const text = await response.text();
-    // Parse the JS variable assignment
-    const match = text.match(/var\s+kiwisdr_com\s*=\s*(\[[\s\S]*?\]);/);
-    if (!match) return getStaticKiwiSDR();
-
-    const receivers = JSON.parse(match[1]) as any[];
-    const events: OmniEvent[] = [];
-
-    for (const rx of receivers.slice(0, 60)) {
-      if (!rx.gps) continue;
-      const [lat, lon] = rx.gps.split(',').map(Number);
-      if (isNaN(lat) || isNaN(lon)) continue;
-
-      events.push({
-        id: `kiwisdr-${rx.url || Math.random().toString(36).slice(2)}`,
-        source: 'kiwisdr',
-        title: `🔊 KiwiSDR: ${rx.name || 'Receiver'}`,
-        severity: 'minor',
-        eventType: 'infrastructure' as const,
-        timestamp: new Date().toISOString(),
-        coordinates: { longitude: lon, latitude: lat },
-        metadata: {
-          bands: rx.bands,
-          antenna: rx.antenna,
-          location: rx.location,
-          users: rx.users,
-          url: rx.url
-        }
-      });
-    }
-    console.log(`[KiwiSDR] Fetched ${events.length} SDR receivers.`);
-    return events.length > 0 ? events : getStaticKiwiSDR();
-  } catch (err) {
-    console.warn('[KiwiSDR] Error, using static positions:', err);
-    return getStaticKiwiSDR();
+  const res = await fetchWithTimeout('http://rx.linkfanel.net/kiwisdr_com.js', {}, 12000);
+  if (!res.ok) throw new Error(`KiwiSDR list request failed: HTTP ${res.status}`);
+  const receivers = parseKiwiSdrPayload(await res.text());
+  const events: OmniEvent[] = [];
+  for (const rx of receivers.slice(0, 60)) {
+    const coordinates = parseGpsField(rx.gps);
+    if (!coordinates) continue;
+    events.push({
+      id: `kiwisdr-${hashId(rx.url, rx.name, rx.gps)}`,
+      source: 'kiwisdr',
+      title: `🔊 KiwiSDR: ${rx.name || 'Receiver'}`,
+      severity: 'minor',
+      eventType: 'infrastructure',
+      coordinates,
+      timestamp: toIso(rx.updated) || new Date().toISOString(),
+      sourceTimestamp: toIso(rx.updated),
+      metadata: {
+        bands: rx.bands,
+        antenna: rx.antenna,
+        location: rx.loc,
+        users: rx.users,
+        url: rx.url,
+      },
+    });
   }
-}
-
-function getStaticKiwiSDR(): OmniEvent[] {
-  const receivers = [
-    { name: 'Twente WebSDR', lon: 6.85, lat: 52.24, loc: 'Netherlands' },
-    { name: 'Shiokaze SDR', lon: 135.50, lat: 34.69, loc: 'Japan' },
-    { name: 'Wide-band WebSDR', lon: -73.95, lat: 40.81, loc: 'New York' },
-    { name: 'KiwiSDR Iceland', lon: -21.90, lat: 64.13, loc: 'Iceland' },
-    { name: 'KiwiSDR Tasmania', lon: 147.33, lat: -42.88, loc: 'Australia' },
-    { name: 'KiwiSDR Brazil', lon: -43.17, lat: -22.91, loc: 'Brazil' },
-  ];
-  return receivers.map((r, i) => ({
-    id: `kiwisdr-static-${i}`,
-    source: 'kiwisdr',
-    title: `🔊 ${r.name}`,
-    severity: 'minor' as OmniEvent['severity'],
-    eventType: 'infrastructure' as const,
-    timestamp: new Date().toISOString(),
-    coordinates: { longitude: r.lon, latitude: r.lat },
-    metadata: { location: r.loc }
-  }));
+  return events;
 }

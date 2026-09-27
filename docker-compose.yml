@@ -1,0 +1,31 @@
+services:
+  omniwatch:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_BASE: ""
+    image: omniwatch:local
+    container_name: omniwatch
+    ports:
+      - "7860:7860"
+    environment:
+      NODE_ENV: production
+      PORT: "7860"
+      HISTORY_DB_PATH: /app/server/data/omniwatch.db
+      HISTORY_RETENTION_DAYS: "30"
+    env_file:
+      - path: ./omniwatch-server/.env
+        required: false
+    volumes:
+      - omniwatch-data:/app/server/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:7860/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      start_period: 120s
+      retries: 3
+
+volumes:
+  omniwatch-data:
