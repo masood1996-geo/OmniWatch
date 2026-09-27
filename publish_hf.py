@@ -98,11 +98,37 @@ def preflight(root: Path):
 
 def build_ignore_patterns(excluded_env_files):
     patterns = [
-        "**/.git/**", ".git/**",
-        "**/node_modules/**", "**/.next/**", "**/out/**", "**/dist/**",
-        "**/__pycache__/**", "**/runs/**", "**/data/**",
-        "**/.env", "**/.env.*",
-        "*.log", "**/*.log", "*.db", "**/*.db",
+        ".git", ".git/**", "**/.git", "**/.git/**",
+        "node_modules", "node_modules/**", "**/node_modules", "**/node_modules/**",
+        ".next", ".next/**", "**/.next", "**/.next/**",
+        "out", "out/**", "**/out", "**/out/**",
+        "dist", "dist/**", "**/dist", "**/dist/**",
+        "__pycache__", "__pycache__/**", "**/__pycache__", "**/__pycache__/**",
+        "runs", "runs/**", "**/runs", "**/runs/**",
+        "data", "data/**", "**/data", "**/data/**",
+        "coverage", "coverage/**", "**/coverage", "**/coverage/**",
+        "*.log", "**/*.log", "*.db", "**/*.db", "*.db-wal", "*.db-shm",
+        "*.tsbuildinfo", "**/*.tsbuildinfo",
+        ".env", "**/.env",
+        "publish_hf.py", "**/publish_hf.py",
+    ]
+    patterns.extend(excluded_env_files)
+    return sorted(set(patterns))
+
+
+def build_deletion_patterns(excluded_env_files):
+    patterns = [
+        "node_modules/**", "**/node_modules/**",
+        ".next/**", "**/.next/**",
+        "out/**", "**/out/**",
+        "dist/**", "**/dist/**",
+        "__pycache__/**", "**/__pycache__/**",
+        "runs/**", "**/runs/**",
+        "data/**", "**/data/**",
+        "*.db", "**/*.db", "*.db-wal", "*.db-shm",
+        "*.log", "**/*.log",
+        "omniwatch-server/.env.template",
+        "**/.env",
     ]
     patterns.extend(excluded_env_files)
     return sorted(set(patterns))
@@ -115,6 +141,8 @@ def main():
 
     print("[PREFLIGHT] File scan complete")
     print(f"  candidate files: {len(candidates)}")
+    env_templates = [c for c in candidates if is_env_template(Path(c).name)]
+    print(f"  env templates included: {env_templates or 'none found'}")
     print(f"  excluded non-template .env files: {len(excluded_env_files)}")
     for relative in excluded_env_files:
         print(f"    - EXCLUDED (never uploaded): {relative}")
@@ -156,12 +184,20 @@ def main():
     except Exception as e:
         print(f"[WARN] Space creation note: {e}")
 
+    lenient_dirs = [p for p in candidates if "/node_modules/" in p or p.startswith("node_modules/")]
+    if lenient_dirs:
+        print("[REFUSED] node_modules content slipped into the candidate list; aborting upload.")
+        for path in lenient_dirs[:10]:
+            print(f"    - {path}")
+        return 1
+
     print(f"\n[UPLOAD] Uploading files from {SPACE_DIR}...")
     api.upload_folder(
         folder_path=str(SPACE_DIR),
         repo_id=SPACE_ID,
         repo_type="space",
         ignore_patterns=build_ignore_patterns(excluded_env_files),
+        delete_patterns=build_deletion_patterns(excluded_env_files),
         commit_message="feat: Deploy OmniWatch server & client via Docker",
     )
     print("\n[DONE] Upload complete.")
