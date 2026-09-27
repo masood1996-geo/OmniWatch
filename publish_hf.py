@@ -203,6 +203,23 @@ def main():
     print("\n[DONE] Upload complete.")
     print("[LIVE] https://huggingface.co/spaces/" + SPACE_ID)
     print("Configure secrets in Space Settings -> Variables and secrets (never in files).")
+
+    print("\n[STATUS] Checking Space runtime...")
+    try:
+        rt = api.get_space_runtime(repo_id=SPACE_ID)
+        raw = getattr(rt, "raw", {}) or {}
+        stage = str(rt.stage).upper()
+        print(f"  stage: {rt.stage}")
+        error = raw.get("errorMessage")
+        if error:
+            print(f"  error: {error}")
+        if stage != "RUNNING":
+            print("  [WARN] The Space is not running. Billing, hardware or a moderation flag")
+            print("         (e.g. 'Flagged as abusive') must be resolved in the Space settings")
+            print("         or with Hugging Face support; code changes cannot fix it.")
+            return 1
+    except Exception as e:
+        print(f"  could not read runtime: {type(e).__name__}: {str(e)[:200]}")
     return 0
 
 

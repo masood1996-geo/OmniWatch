@@ -73,6 +73,22 @@ docker compose logs -f omniwatch
 
 ## Hugging Face Spaces (Docker SDK)
 
+> **Constraints observed 2026-09-27 (verify current policy):**
+> - Docker Spaces on free `cpu-basic` now return **402 Payment Required** ("hosting Gradio and
+>   Docker Spaces on free cpu-basic requires a PRO subscription") when (re)creating.
+> - A Space can be **paused with `errorMessage: "Flagged as abusive"`**; restart then returns
+>   **503**. This is an account/Space moderation or billing state resolved only through Space
+>   settings or Hugging Face support — not fixable in the repository.
+> - Never upload `node_modules`/build output. `publish_hf.py` preflights for `.env` files and
+>   asserts `node_modules` never enters the upload; a first version of the script leaked local
+>   `node_modules` (root paths were not matched by `**/node_modules/**` in `fnmatch`), which was
+>   cleaned with `delete_patterns`.
+> - `publish_hf.py` now prints the runtime stage after upload and exits non-zero when the Space
+>   is not RUNNING.
+>
+> Alternatives if HF cannot host it: Docker Compose on a VPS, Fly.io/Render, or the GitHub
+> release artifacts. The app is self-contained and needs one port plus a data volume.
+
 1. Create a Docker Space; its README front-matter already contains `sdk: docker` and
    `app_port: 7860`.
 2. **Never upload `.env`.** The publisher refuses to run when secrets would be included:
